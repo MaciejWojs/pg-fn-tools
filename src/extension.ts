@@ -535,12 +535,193 @@ class PostgresRenameProvider implements vscode.RenameProvider {
   }
 }
 
+class PostgresCompletionProvider extends BasePostgresProvider implements vscode.CompletionItemProvider {
+  private workspaceNames: Set<string> = new Set();
+  private workspaceInfo: Map<string, { isFunction: boolean; parameters: string; description: string }> = new Map();
+  private cacheReady: boolean = false;
+  private refreshTimeout: any = undefined;
+
+  async initialize(context: vscode.ExtensionContext) {
+    // Wstępne zapełnienie cache w tle
+    this.refreshWorkspaceCache();
+
+    const watcher = vscode.workspace.createFileSystemWatcher("**/*.{sql,SQL}");
+    const schedule = () => this.scheduleRefresh();
+    watcher.onDidChange(schedule);
+    watcher.onDidCreate(schedule);
+    watcher.onDidDelete(schedule);
+
+    context.subscriptions.push(watcher);
+  }
+
+  private scheduleRefresh(delay = 500) {
+    if (this.refreshTimeout) clearTimeout(this.refreshTimeout);
+    this.refreshTimeout = setTimeout(() => {
+      this.refreshWorkspaceCache();
+    }, delay);
+  }
+
+  private async refreshWorkspaceCache() {
+    this.cacheReady = false;
+    this.workspaceNames.clear();
+    this.workspaceInfo.clear();
+
+    const sqlFiles = await vscode.workspace.findFiles("**/*.{sql,SQL}");
+    for (const uri of sqlFiles) {
+      try {
+        const doc = await vscode.workspace.openTextDocument(uri);
+        const text = doc.getText();
+        const regex = /create\s+(?:or\s+replace\s+)?(?:function|procedure)\s+([a-zA-Z0-9_\.\"]+)\s*\(/gi;
+        let m: RegExpExecArray | null;
+        while ((m = regex.exec(text)) !== null) {
+          const raw = m[1].replace(/\\"/g, "");
+          this.workspaceNames.add(raw);
+          if (!this.workspaceInfo.has(raw)) {
+            const info = this.findFunctionInfoInText(text, raw);
+            if (info) this.workspaceInfo.set(raw, info);
+          }
+        }
+      } catch (e) {
+        // ignoruj
+      }
+    }
+
+    this.cacheReady = true;
+  }
+
+  async provideCompletionItems(
+    document: vscode.TextDocument,
+    position: vscode.Position,
+    _token: vscode.CancellationToken,
+    _context: vscode.CompletionContext
+  ): Promise<vscode.CompletionItem[] | vscode.CompletionList | null> {
+    const items: vscode.CompletionItem[] = [];
+
+    // Dodaj słowa kluczowe Postgresa
+    for (const kw of POSTGRES_KEYWORDS) {
+      const item = new vscode.CompletionItem(kw.toUpperCase(), vscode.CompletionItemKind.Keyword);
+      item.detail = "Postgres keyword";
+      items.push(item);
+    }
+
+    // Wyciągnij nazwy funkcji/procedur z bieżącego dokumentu
+    const docText = document.getText();
+    const nameRegex = /create\s+(?:or\s+replace\s+)?(?:function|procedure)\s+([a-zA-Z0-9_\.\"]+)\s*\(/gi;
+    const names = new Set<string>();
+    let m: RegExpExecArray | null;
+    while ((m = nameRegex.exec(docText)) !== null) {
+      names.add(m[1].replace(/\"/g, ""));
+    }
+
+    // Dodatkowo użyj cache workspace (szybkie). Jeśli cache niegotowe,
+    // uruchom odświeżenie w tle, ale nie czekaj na nie.
+    if (this.cacheReady) {
+      for (const n of this.workspaceNames) names.add(n);
+    } else {
+      // uruchom tło
+      this.refreshWorkspaceCache();
+    }
+
+    for (const n of names) {
+      const item = new vscode.CompletionItem(n, vscode.CompletionItemKind.Function);
+      item.detail = "Function/Procedure (Postgres)";
+
+      // Dołącz dokumentację (parametry + opis) jeśli dostępna
+      try {
+        const info = await this.getFunctionInfo(n, document);
+        if (info) {
+          const md = new vscode.MarkdownString();
+          md.appendMarkdown(`**${info.isFunction ? "Function" : "Procedure"}**: \`${n}\`\n\n`);
+          if (info.parameters && info.parameters.trim().length > 0) {
+            md.appendMarkdown("**Parameters:**\n```sql\n");
+            md.appendMarkdown(info.parameters.trim());
+            md.appendMarkdown("\n```\n\n");
+          }
+          md.appendMarkdown(`**Description:**\n${info.description || "Brak opisu"}`);
+          item.documentation = md;
+        }
+      } catch (e) {
+        // ignore
+      }
+
+      items.push(item);
+    }
+
+    return items;
+  }
+
+  // findAllFunctionProcedureNamesInWorkspace pozostawione dla kompatybilności,
+  // ale preferowane jest użycie cache (workspaceNames/workspaceInfo).
+  private async findAllFunctionProcedureNamesInWorkspace(): Promise<Set<string>> {
+    if (this.cacheReady) return new Set(this.workspaceNames);
+    const result = new Set<string>();
+    const sqlFiles = await vscode.workspace.findFiles("**/*.{sql,SQL}");
+    for (const uri of sqlFiles) {
+      try {
+        const doc = await vscode.workspace.openTextDocument(uri);
+        const text = doc.getText();
+        const regex = /create\s+(?:or\s+replace\s+)?(?:function|procedure)\s+([a-zA-Z0-9_\.\"]+)\s*\(/gi;
+        let m: RegExpExecArray | null;
+        while ((m = regex.exec(text)) !== null) {
+          result.add(m[1].replace(/\\"/g, ""));
+        }
+      } catch (e) {
+        // ignoruj pliki, których nie można otworzyć
+      }
+    }
+    return result;
+  }
+
+  private async getFunctionInfo(name: string, document: vscode.TextDocument): Promise<{ isFunction: boolean; parameters: string; description: string } | null> {
+    // Najpierw spróbuj w bieżącym dokumencie
+    const inDoc = this.findFunctionInfoInText(document.getText(), name);
+    if (inDoc) return inDoc;
+    // Jeśli mamy cache, użyj go (szybkie)
+    if (this.cacheReady && this.workspaceInfo.has(name)) {
+      return this.workspaceInfo.get(name) || null;
+    }
+
+    // W przeciwnym razie spróbuj wyszukać w workspace (wolniejsze)
+    const found = await this.findInWorkspace((doc) => {
+      const info = this.findFunctionInfoInText(doc.getText(), name);
+      return info ? info : null;
+    });
+
+    return found as { isFunction: boolean; parameters: string; description: string } | null;
+  }
+
+  private findFunctionInfoInText(text: string, name: string): { isFunction: boolean; parameters: string; description: string } | null {
+    const functionRegex = new RegExp(
+      `create\\s+(or\\s+replace\\s+)?(function|procedure)\\s+${escapeRegex(name)}\\s*\\(([^)]*?)\\)`,
+      "i"
+    );
+
+    const functionMatch = text.match(functionRegex);
+    if (!functionMatch) return null;
+
+    const isFunction = functionMatch[2].toLowerCase() === "function";
+    const parameters = (functionMatch[3] || "").trim();
+
+    const commentRegex = new RegExp(
+      `comment\\s+on\\s+(function|procedure)\\s+${escapeRegex(name)}\\s*(?:\\([^)]*?\\))?\\s+is\\s+['"]([^'"]+)['"]`,
+      "i"
+    );
+    const commentMatch = text.match(commentRegex);
+    const description = commentMatch ? commentMatch[2] : "Brak opisu";
+
+    return { isFunction, parameters, description };
+  }
+}
+
 export const activate = (context: vscode.ExtensionContext) => {
   const symbolProvider = new PostgresDocumentSymbolProvider();
   const hoverProvider = new PostgresHoverProvider();
   const definitionProvider = new PostgresDefinitionProvider();
   const referenceProvider = new PostgresReferenceProvider();
   const renameProvider = new PostgresRenameProvider();
+  const completionProvider = new PostgresCompletionProvider();
+  // Inicjalizuj cache i watcher plików dla szybkich podpowiedzi
+  completionProvider.initialize(context);
 
   const selector: vscode.DocumentSelector = [
     { language: "sql" }
@@ -552,6 +733,8 @@ export const activate = (context: vscode.ExtensionContext) => {
     vscode.languages.registerDefinitionProvider(selector, definitionProvider),
     vscode.languages.registerReferenceProvider(selector, referenceProvider),
     vscode.languages.registerRenameProvider(selector, renameProvider)
+    ,
+    vscode.languages.registerCompletionItemProvider(selector, completionProvider)
   );
 
   const showFunctionsCommand = vscode.commands.registerCommand(
