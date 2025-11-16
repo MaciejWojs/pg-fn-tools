@@ -38,7 +38,7 @@ export class PostgresRenameProvider implements vscode.RenameProvider {
                 return Promise.reject("The new name must be different from the old one and cannot be a reserved keyword.");
             }
 
-            const edit = await this.provideHeuristicRenameEdits(document, wordRange, newName, oldName);
+            const edit = await this.provideHeuristicRenameEdits(document, position, wordRange, newName, oldName);
 
             if (!edit) {
                 return Promise.reject("No results for rename at this location.");
@@ -75,37 +75,101 @@ export class PostgresRenameProvider implements vscode.RenameProvider {
 
     private async provideHeuristicRenameEdits(
         document: vscode.TextDocument,
+        position: vscode.Position,
         wordRange: vscode.Range,
         newName: string,
         oldName: string
     ): Promise<vscode.WorkspaceEdit | undefined> {
         const edit = new vscode.WorkspaceEdit();
 
-        const declStart = findDeclarationStart(document, wordRange.start.line);
-        const declEnd = findDeclarationEnd(document, declStart);
-
-        const declarationLineText = document.lineAt(declStart).text;
-        const isOnDeclarationName =
-            DECLARATION_REGEX.test(declarationLineText) &&
-            declarationLineText.toLowerCase().includes(oldName.toLowerCase());
-
-        if (isOnDeclarationName && wordRange.start.line === declStart) {
+        const isOnFunctionDeclaration = this.isOnFunctionDeclaration(document, position, oldName);
+        
+        if (isOnFunctionDeclaration) {
+            console.log('Applying GLOBAL rename for function declaration');
             return await this.applyGlobalRename(document, edit, oldName, newName);
         }
 
-        const isInParams = this.isInParameterRange(document, declStart, declEnd, wordRange.start);
-        const isInDeclare = this.isInDeclareRange(document, declStart, declEnd, wordRange.start);
-
-        if (isInParams || isInDeclare) {
-            return this.applyLocalRename(document, edit, declStart, declEnd, oldName, newName);
+        const isFunctionCall = this.isFunctionCall(document, position, wordRange, oldName);
+        
+        if (isFunctionCall) {
+            console.log('Applying GLOBAL rename for function call');
+            return await this.applyGlobalRename(document, edit, oldName, newName);
         }
 
-        const isInFunctionBody = wordRange.start.line > declStart && wordRange.start.line < declEnd;
-        if (isInFunctionBody) {
-            return this.applyLocalRename(document, edit, declStart, declEnd, oldName, newName);
+        const declStart = findDeclarationStart(document, position.line);
+        const declEnd = findDeclarationEnd(document, declStart);
+
+        console.log(`Local rename - declStart: ${declStart}, declEnd: ${declEnd}, position: ${position.line}`);
+
+        return this.applyLocalRename(document, edit, declStart, declEnd, oldName, newName);
+    }
+
+    private isOnFunctionDeclaration(
+        document: vscode.TextDocument,
+        position: vscode.Position,
+        oldName: string
+    ): boolean {
+        const lineText = document.lineAt(position.line).text;
+        
+        const isFunctionDeclaration = this.looksLikeFunctionDeclaration(lineText);
+        
+        if (!isFunctionDeclaration) {
+            console.log('Not a function declaration line:', lineText);
+            return false;
         }
 
-        return undefined;
+        const functionNameRegex = new RegExp(`\\b${escapeRegex(oldName)}\\b`, 'i');
+        const nameMatch = functionNameRegex.exec(lineText);
+        
+        if (!nameMatch) {
+            console.log('Function name not found in declaration line');
+            return false;
+        }
+
+        const nameStart = nameMatch.index;
+        const nameEnd = nameStart + oldName.length;
+        
+        const isCursorOnName = position.character >= nameStart && position.character <= nameEnd;
+        
+        console.log(`Cursor on function name: ${isCursorOnName}, name: ${oldName}, position: ${position.character}, nameRange: [${nameStart}, ${nameEnd}]`);
+        
+        return isCursorOnName;
+    }
+
+    private looksLikeFunctionDeclaration(lineText: string): boolean {
+        const normalizedLine = lineText.toLowerCase().trim();
+        
+        const functionPatterns = [
+            /create\s+function/i,
+            /create\s+or\s+replace\s+function/i,
+            /function\s+\w+/i,
+            /procedure\s+\w+/i,
+            /create\s+procedure/i,
+            /create\s+or\s+replace\s+procedure/i
+        ];
+
+        return functionPatterns.some(pattern => pattern.test(normalizedLine));
+    }
+
+    private isFunctionCall(
+        document: vscode.TextDocument,
+        position: vscode.Position,
+        wordRange: vscode.Range,
+        oldName: string
+    ): boolean {
+        const lineText = document.lineAt(position.line).text;
+        
+        const wordStart = wordRange.start.character;
+        const wordEnd = wordRange.end.character;
+        
+        let afterWord = lineText.substring(wordEnd).trimStart();
+        
+        if (afterWord.startsWith('(')) {
+            console.log(`Function call detected: ${oldName}(...) at line ${position.line}`);
+            return true;
+        }
+        
+        return false;
     }
 
     private async applyGlobalRename(
@@ -113,28 +177,70 @@ export class PostgresRenameProvider implements vscode.RenameProvider {
         edit: vscode.WorkspaceEdit,
         oldName: string,
         newName: string
-    ): Promise<vscode.WorkspaceEdit | undefined> {
+    ): Promise<vscode.WorkspaceEdit> {
+        console.log(`Starting GLOBAL rename: ${oldName} -> ${newName}`);
+        
         const regex = new RegExp(`\\b${escapeRegex(oldName)}\\b`, "gi");
 
-        const sqlFiles = await vscode.workspace.findFiles("**/*.{sql,SQL}");
-        for (const uri of sqlFiles) {
-            try {
-                const doc = await vscode.workspace.openTextDocument(uri);
-                for (let line = 0; line < doc.lineCount; line++) {
-                    const textLine = doc.lineAt(line);
-                    let match: RegExpExecArray | null;
-                    regex.lastIndex = 0;
-                    while ((match = regex.exec(textLine.text))) {
-                        const start = new vscode.Position(line, match.index ?? 0);
-                        const end = new vscode.Position(line, (match.index ?? 0) + oldName.length);
-                        edit.replace(doc.uri, new vscode.Range(start, end), newName);
-                    }
-                }
-            } catch (e) {
+        for (let line = 0; line < document.lineCount; line++) {
+            const textLine = document.lineAt(line);
+            let match: RegExpExecArray | null;
+            regex.lastIndex = 0;
+            while ((match = regex.exec(textLine.text))) {
+                const start = new vscode.Position(line, match.index);
+                const end = new vscode.Position(line, match.index + oldName.length);
+                edit.replace(document.uri, new vscode.Range(start, end), newName);
+                console.log(`Replaced in current document at line ${line}`);
             }
         }
 
-        return edit.size > 0 ? edit : undefined;
+        try {
+            const sqlFilesLower = await vscode.workspace.findFiles("**/*.sql", "**/node_modules/**");
+            const sqlFilesUpper = await vscode.workspace.findFiles("**/*.SQL", "**/node_modules/**");
+            const allSqlFiles = [...sqlFilesLower, ...sqlFilesUpper];
+            
+            const uniqueFiles = Array.from(new Set(allSqlFiles.map(uri => uri.fsPath)))
+                .map(fsPath => allSqlFiles.find(uri => uri.fsPath === fsPath)!);
+            
+            console.log(`Found ${uniqueFiles.length} SQL files to search`);
+            
+            for (const uri of uniqueFiles) {
+                if (uri.fsPath === document.uri.fsPath) {
+                    console.log(`Skipping current document: ${uri.fsPath}`);
+                    continue;
+                }
+                
+                try {
+                    console.log(`Processing file: ${uri.fsPath}`);
+                    const doc = await vscode.workspace.openTextDocument(uri);
+                    let replacementCount = 0;
+                    
+                    for (let line = 0; line < doc.lineCount; line++) {
+                        const textLine = doc.lineAt(line);
+                        let match: RegExpExecArray | null;
+                        regex.lastIndex = 0;
+                        while ((match = regex.exec(textLine.text))) {
+                            const start = new vscode.Position(line, match.index);
+                            const end = new vscode.Position(line, match.index + oldName.length);
+                            edit.replace(doc.uri, new vscode.Range(start, end), newName);
+                            replacementCount++;
+                            console.log(`Replaced in ${uri.fsPath} at line ${line}, column ${match.index}`);
+                        }
+                    }
+                    
+                    if (replacementCount > 0) {
+                        console.log(`Total replacements in ${uri.fsPath}: ${replacementCount}`);
+                    }
+                } catch (e) {
+                    console.error(`Error processing file ${uri.fsPath}:`, e);
+                }
+            }
+        } catch (error) {
+            console.error('Error finding SQL files:', error);
+        }
+
+        console.log('Global rename completed');
+        return edit;
     }
 
     private applyLocalRename(
@@ -144,7 +250,9 @@ export class PostgresRenameProvider implements vscode.RenameProvider {
         declEnd: number,
         oldName: string,
         newName: string
-    ): vscode.WorkspaceEdit | undefined {
+    ): vscode.WorkspaceEdit {
+        console.log(`Applying LOCAL rename from line ${declStart} to ${declEnd}`);
+        
         const bodyRegex = new RegExp(`\\b${escapeRegex(oldName)}\\b`, "g");
 
         for (let line = declStart; line <= declEnd; line++) {
@@ -153,13 +261,14 @@ export class PostgresRenameProvider implements vscode.RenameProvider {
             bodyRegex.lastIndex = 0;
 
             while ((match = bodyRegex.exec(textLine.text))) {
-                const start = new vscode.Position(line, match.index ?? 0);
-                const end = new vscode.Position(line, (match.index ?? 0) + oldName.length);
+                const start = new vscode.Position(line, match.index);
+                const end = new vscode.Position(line, match.index + oldName.length);
                 edit.replace(document.uri, new vscode.Range(start, end), newName);
+                console.log(`Local replace at line ${line}`);
             }
         }
 
-        return edit.size > 0 ? edit : undefined;
+        return edit;
     }
 
     private isInDeclareRange(
