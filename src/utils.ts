@@ -135,7 +135,20 @@ export function parseDeclarationsFromText(text: string): DeclarationInfo[] {
         const balanced = extractBalancedParentheses(text, parenIndex);
         if (!balanced) continue;
 
-        const endIndex = balanced.endIndex;
+        let endIndex = balanced.endIndex;
+        try {
+            const endRegex = /\bend\s*;/ig;
+            endRegex.lastIndex = balanced.endIndex;
+            const endMatch = endRegex.exec(text);
+            if (endMatch && endMatch.index >= 0) {
+                endIndex = endMatch.index + endMatch[0].length;
+            } else {
+                const semi = text.indexOf(';', balanced.endIndex);
+                if (semi !== -1) endIndex = semi + 1;
+            }
+        } catch (e) {
+            // ignore and keep balanced.endIndex
+        }
         const params = balanced.content;
         const normalized = nameRaw.startsWith('"') ? nameRaw.replace(/^"|"$/g, '') : nameRaw;
 
@@ -292,20 +305,45 @@ export function findDeclarationStart(document: vscode.TextDocument, line: number
             return currentLine;
         }
     }
-    return line;
+    return -1;
 }
 
 export function findDeclarationEnd(document: vscode.TextDocument, line: number): number {
+    if (line < 0) return -1;
+
     const lastLine = document.lineCount - 1;
+
+    let beginCount = 0;
+    let sawBegin = false;
     for (let currentLine = line; currentLine <= lastLine; currentLine++) {
-        if (END_REGEX.test(document.lineAt(currentLine).text)) {
+        const text = document.lineAt(currentLine).text;
+        const begins = (text.match(/\bBEGIN\b/ig) || []).length;
+        const ends = (text.match(/\bEND\b/ig) || []).length;
+
+        if (begins > 0) {
+            sawBegin = true;
+            beginCount += begins;
+        }
+        if (ends > 0) {
+            beginCount -= ends;
+            if (sawBegin && beginCount <= 0 && END_REGEX.test(text)) {
+                return currentLine;
+            }
+        }
+    }
+
+    for (let currentLine = line; currentLine <= lastLine; currentLine++) {
+        const text = document.lineAt(currentLine).text;
+        if (END_REGEX.test(text)) {
             return currentLine;
         }
     }
+
     for (let currentLine = line; currentLine <= lastLine; currentLine++) {
         if (document.lineAt(currentLine).text.includes(";")) {
             return currentLine;
         }
     }
+
     return lastLine;
 }
