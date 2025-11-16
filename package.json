@@ -2,12 +2,15 @@
   "main": "./dist/extension.cjs",
   "module": "index.ts",
   "dependencies": {
-    "@types/vscode": "^1.86.0"
+    "@types/vscode": "^1.86.0",
+    "pgsql-ast-parser": "^12.0.1",
+    "tree-sitter": "^0.25.0",
+    "tree-sitter-sql": "^0.1.0"
   },
   "devDependencies": {
     "@types/bun": "latest",
-    "@vscode/vsce": "^2.23.0",
-    "esbuild": "^0.20.0"
+    "@vscode/vsce": "^3.0.0",
+    "esbuild": "^0.27.0"
   },
   "peerDependencies": {
     "typescript": "^5.0.0"
@@ -18,7 +21,7 @@
     "build": "bun run ./scripts/build-with-esbuild.ts",
     "watch": "bun run ./scripts/watch-with-esbuild.ts",
     "vsce-package": "bun run vsce package",
-    "package": "bun run build && bun run vsce-package",
+    "package": "bun run build --compile && bun run vsce-package",
     "clean": "rm -r ./dist"
   },
   "//": "START EXTENSION ATTRIBUTES",
@@ -31,14 +34,29 @@
     "url": "https://github.com/YOURNAME"
   },
   "contributes": {
+    "languages": [],
     "commands": [
       {
         "command": "bun-vscode-extension.helloworld",
         "title": "Hello World"
+      },
+      {
+        "command": "postgres.showFunctions",
+        "title": "Postgres: Pokaż funkcje/procedury w pliku"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "postgres.showFunctions",
+        "key": "ctrl+shift+.",
+        "when": "editorTextFocus && editorLangId == sql"
       }
     ]
   },
   "engines": {
     "vscode": "^1.86.0"
-  }
+  },
+  "activationEvents": [
+    "onLanguage:sql"
+  ]
 }
