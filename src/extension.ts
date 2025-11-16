@@ -23,13 +23,294 @@ const POSTGRES_KEYWORDS: string[] = [
   "plpgsql", "found", "row", "record", "sql", "immutable", "stable", "definer", "invoker",
 ];
 
-const FUNCTION_REGEX = /create\s+(or\s+replace\s+)?function\s+([a-zA-Z0-9_\.]+)\s*\(/i;
-const PROCEDURE_REGEX = /create\s+(or\s+replace\s+)?procedure\s+([a-zA-Z0-9_\.]+)\s*\(/i;
 const DECLARATION_REGEX = /create\s+(or\s+replace\s+)?(function|procedure)\b/i;
 const DECLARE_REGEX = /\bDECLARE\b/i;
 const BEGIN_REGEX = /\bBEGIN\b/i;
 const END_REGEX = /\bend\s*;/i;
-const WORD_RANGE_REGEX = /[a-zA-Z0-9_\.]+/;
+const WORD_RANGE_REGEX = /"[^"]+"|[a-zA-Z0-9_:\.]+/;
+
+// Balanced-parenthesis extractor and declaration parser helpers
+function extractBalancedParentheses(text: string, openIndex: number): { content: string; endIndex: number } | null {
+  let i = openIndex;
+  if (text[i] !== '(') return null;
+
+  let depth = 0;
+  let inSingleQuote = false;
+  let inDoubleQuote = false;
+  let inLineComment = false;
+  let inBlockComment = false;
+
+  i++; // start after '('
+  const start = i;
+  for (; i < text.length; i++) {
+    const ch = text[i];
+    const prev = text[i - 1];
+
+    if (inLineComment) {
+      if (ch === '\n') inLineComment = false;
+      continue;
+    }
+    if (inBlockComment) {
+      if (prev === '*' && ch === '/') inBlockComment = false;
+      continue;
+    }
+
+    if (!inSingleQuote && !inDoubleQuote) {
+      if (ch === '-' && text[i + 1] === '-') {
+        inLineComment = true;
+        i++;
+        continue;
+      }
+      if (ch === '/' && text[i + 1] === '*') {
+        inBlockComment = true;
+        i++;
+        continue;
+      }
+    }
+
+    if (ch === "'" && !inDoubleQuote) {
+      inSingleQuote = !inSingleQuote;
+      continue;
+    }
+    if (ch === '"' && !inSingleQuote) {
+      inDoubleQuote = !inDoubleQuote;
+      continue;
+    }
+
+    if (inSingleQuote || inDoubleQuote) continue;
+
+    if (ch === '(') depth++;
+    else if (ch === ')') {
+      if (depth === 0) {
+        const content = text.substring(start, i);
+        return { content, endIndex: i };
+      }
+      depth--;
+    }
+  }
+
+  return null;
+}
+
+interface DeclarationInfo {
+  nameRaw: string;
+  name: string;
+  isFunction: boolean;
+  params: string;
+  startIndex: number;
+  endIndex: number;
+}
+
+function parseDeclarationsFromText(text: string): DeclarationInfo[] {
+  const results: DeclarationInfo[] = [];
+  const regex = /create\s+(or\s+replace\s+)?(function|procedure)\b/ig;
+  let m: RegExpExecArray | null;
+  while ((m = regex.exec(text)) !== null) {
+    const declType = (m[2] || '').toLowerCase();
+    const after = regex.lastIndex;
+    // skip whitespace
+    let i = after;
+    while (i < text.length && /\s/.test(text[i])) i++;
+
+    // parse name (could be quoted or schema.qualified)
+    if (i >= text.length) continue;
+    let nameRaw = '';
+    if (text[i] === '"') {
+      // quoted identifier
+      let j = i + 1;
+      while (j < text.length) {
+        if (text[j] === '"') {
+          // allow escaped quotes by doubling
+          if (text[j + 1] === '"') {
+            j += 2;
+            continue;
+          }
+          j++;
+          break;
+        }
+        j++;
+      }
+      nameRaw = text.substring(i, j);
+      i = j;
+    } else {
+      let j = i;
+      while (j < text.length && /[a-zA-Z0-9_:\.\$]/.test(text[j])) j++;
+      nameRaw = text.substring(i, j);
+      i = j;
+    }
+
+    // find first '(' after name
+    const parenIndex = text.indexOf('(', i);
+    if (parenIndex === -1) continue;
+    const balanced = extractBalancedParentheses(text, parenIndex);
+    if (!balanced) continue;
+
+    const endIndex = balanced.endIndex;
+    const params = balanced.content;
+    const normalized = nameRaw.startsWith('"') ? nameRaw.replace(/^"|"$/g, '') : nameRaw;
+
+    results.push({ nameRaw, name: normalized, isFunction: declType === 'function', params, startIndex: m.index, endIndex });
+
+    // advance regex position
+    regex.lastIndex = endIndex;
+  }
+  return results;
+}
+
+function splitParameters(paramText: string): string[] {
+  const params: string[] = [];
+  let current = '';
+  let inSingle = false;
+  let inDouble = false;
+  let inLineComment = false;
+  let inBlockComment = false;
+  let depth = 0;
+
+  for (let i = 0; i < paramText.length; i++) {
+    const ch = paramText[i];
+    const prev = paramText[i - 1];
+
+    if (inLineComment) {
+      current += ch;
+      if (ch === '\n') inLineComment = false;
+      continue;
+    }
+    if (inBlockComment) {
+      current += ch;
+      if (prev === '*' && ch === '/') inBlockComment = false;
+      continue;
+    }
+
+    if (!inSingle && !inDouble) {
+      if (ch === '-' && paramText[i + 1] === '-') {
+        inLineComment = true;
+        current += ch;
+        continue;
+      }
+      if (ch === '/' && paramText[i + 1] === '*') {
+        inBlockComment = true;
+        current += ch;
+        continue;
+      }
+    }
+
+    if (ch === "'" && !inDouble) {
+      inSingle = !inSingle;
+      current += ch;
+      continue;
+    }
+    if (ch === '"' && !inSingle) {
+      inDouble = !inDouble;
+      current += ch;
+      continue;
+    }
+
+    if (inSingle || inDouble) {
+      current += ch;
+      continue;
+    }
+
+    if (ch === '(') {
+      depth++;
+      current += ch;
+      continue;
+    }
+    if (ch === ')') {
+      if (depth > 0) depth--;
+      current += ch;
+      continue;
+    }
+
+    if (ch === ',' && depth === 0) {
+      params.push(current.trim());
+      current = '';
+      continue;
+    }
+
+    current += ch;
+  }
+
+  if (current.trim().length > 0) params.push(current.trim());
+  return params;
+}
+
+class PostgresSignatureHelpProvider implements vscode.SignatureHelpProvider {
+  public async provideSignatureHelp(
+    document: vscode.TextDocument,
+    position: vscode.Position,
+    _token: vscode.CancellationToken,
+    _context: vscode.SignatureHelpContext
+  ): Promise<vscode.SignatureHelp | null> {
+    const text = document.getText();
+    const offset = document.offsetAt(position);
+
+    // find nearest '(' before cursor
+    const before = text.substring(0, offset);
+    const parenIdx = before.lastIndexOf('(');
+    if (parenIdx === -1) return null;
+
+    // find function name before paren
+    let i = parenIdx - 1;
+    while (i >= 0 && /\s/.test(before[i])) i--;
+    if (i < 0) return null;
+
+    // collect name token (could be quoted or qualified)
+    let nameEnd = i + 1;
+    let nameStart = i;
+    if (before[nameStart] === '"') {
+      // find matching opening quote
+      nameStart = before.lastIndexOf('"', nameStart - 1);
+      if (nameStart === -1) return null;
+    } else {
+      while (nameStart >= 0 && /[a-zA-Z0-9_:\.\"]/.test(before[nameStart])) nameStart--;
+      nameStart++;
+    }
+
+    const rawName = before.substring(nameStart, nameEnd).trim();
+    const name = normalizeIdentifier(rawName);
+
+    // compute parameter text from paren to cursor
+    const paramsText = before.substring(parenIdx + 1);
+
+    // count comma-separated params at top level
+    const paramParts = splitParameters(paramsText);
+    const activeParameter = Math.max(0, paramParts.length - 1);
+
+    // find declaration in current document or workspace
+    let info: { isFunction: boolean; parameters: string; description: string } | null = null;
+    const localDecls = parseDeclarationsFromText(text);
+    const foundLocal = localDecls.find(d => d.name.toLowerCase() === name.toLowerCase());
+    if (foundLocal) info = { isFunction: foundLocal.isFunction, parameters: foundLocal.params, description: '' };
+
+    if (!info) {
+      const sqlFiles = await vscode.workspace.findFiles("**/*.{sql,SQL}");
+      for (const uri of sqlFiles) {
+        try {
+          const doc = await vscode.workspace.openTextDocument(uri);
+          const decls = parseDeclarationsFromText(doc.getText());
+          const f = decls.find(d => d.name.toLowerCase() === name.toLowerCase());
+          if (f) {
+            info = { isFunction: f.isFunction, parameters: f.params, description: '' };
+            break;
+          }
+        } catch (e) { }
+      }
+    }
+
+    if (!info) return null;
+
+    const paramList = splitParameters(info.parameters || '');
+    const sigLabel = `${name}(${paramList.join(', ')})`;
+    const sig = new vscode.SignatureInformation(sigLabel, info.description || '');
+    sig.parameters = paramList.map(p => new vscode.ParameterInformation(p));
+
+    const help = new vscode.SignatureHelp();
+    help.signatures = [sig];
+    help.activeSignature = 0;
+    help.activeParameter = Math.min(activeParameter, paramList.length - 1 >= 0 ? paramList.length - 1 : 0);
+    return help;
+  }
+}
 
 // ============================================================================
 // UTILITY FUNCTIONS
@@ -90,6 +371,7 @@ abstract class BasePostgresProvider {
     document: vscode.TextDocument,
     position: vscode.Position
   ): { word: string; range: vscode.Range } | null {
+    // try to get word/token at position; handle quoted identifiers
     const wordRange = document.getWordRangeAtPosition(position, WORD_RANGE_REGEX);
     if (!wordRange) return null;
 
@@ -100,49 +382,45 @@ abstract class BasePostgresProvider {
   }
 }
 
+function normalizeIdentifier(id: string): string {
+  if (!id) return id;
+  id = id.trim();
+  if (id.startsWith('"') && id.endsWith('"')) {
+    // remove outer quotes and unescape doubled quotes
+    return id.slice(1, -1).replace(/""/g, '"');
+  }
+  return id;
+}
+
 class PostgresDocumentSymbolProvider implements vscode.DocumentSymbolProvider {
   provideDocumentSymbols(
     document: vscode.TextDocument,
     _token: vscode.CancellationToken
   ): vscode.ProviderResult<vscode.DocumentSymbol[]> {
     const symbols: vscode.DocumentSymbol[] = [];
-
-    for (let line = 0; line < document.lineCount; line++) {
-      const text = document.lineAt(line).text;
-      const symbol = this.extractSymbolFromLine(text, line);
-      if (symbol) {
-        symbols.push(symbol);
-      }
+    const text = document.getText();
+    const decls = parseDeclarationsFromText(text);
+    for (const d of decls) {
+      const start = document.positionAt(d.startIndex);
+      const end = document.positionAt(d.endIndex);
+      // find name position inside the declaration region
+      const declText = text.substring(d.startIndex, d.endIndex + 1);
+      const nameIdx = declText.indexOf(d.nameRaw);
+      const nameStart = nameIdx >= 0 ? document.positionAt(d.startIndex + nameIdx) : start;
+      const nameEnd = nameStart ? new vscode.Position(nameStart.line, nameStart.character + d.name.length) : nameStart;
+      const symbol = new vscode.DocumentSymbol(
+        d.name,
+        "",
+        vscode.SymbolKind.Function,
+        new vscode.Range(start, end),
+        new vscode.Range(nameStart, nameEnd)
+      );
+      symbols.push(symbol);
     }
 
     return symbols;
   }
 
-  private extractSymbolFromLine(text: string, line: number): vscode.DocumentSymbol | null {
-    const functionMatch = text.match(FUNCTION_REGEX);
-    const procedureMatch = text.match(PROCEDURE_REGEX);
-    const match = functionMatch || procedureMatch;
-
-    if (!match) return null;
-
-    const name = match[2];
-    const range = new vscode.Range(
-      new vscode.Position(line, match.index ?? 0),
-      new vscode.Position(line, text.length)
-    );
-    const selectionRange = new vscode.Range(
-      new vscode.Position(line, (match.index ?? 0) + match[0].lastIndexOf(name)),
-      new vscode.Position(line, (match.index ?? 0) + match[0].lastIndexOf(name) + name.length)
-    );
-
-    return new vscode.DocumentSymbol(
-      name,
-      "",
-      vscode.SymbolKind.Function,
-      range,
-      selectionRange
-    );
-  }
 }
 
 class PostgresHoverProvider extends BasePostgresProvider implements vscode.HoverProvider {
@@ -166,26 +444,24 @@ class PostgresHoverProvider extends BasePostgresProvider implements vscode.Hover
 
   private findHoverInDocument(document: vscode.TextDocument, wordName: string): vscode.Hover | null {
     const fullText = document.getText();
-    const functionRegex = new RegExp(
-      `create\\s+(or\\s+replace\\s+)?(function|procedure)\\s+${escapeRegex(wordName)}\\s*\\(([^)]*?)\\)`,
-      "i"
-    );
-    const functionMatch = fullText.match(functionRegex);
+    const decls = parseDeclarationsFromText(fullText);
+    const name = normalizeIdentifier(wordName);
+    const found = decls.find(d => d.name.toLowerCase() === name.toLowerCase());
+    if (!found) return null;
 
-    if (!functionMatch) return null;
+    const isFunction = found.isFunction;
+    const parameters = found.params.trim();
 
-    const isFunction = functionMatch[2].toLowerCase() === "function";
-    const parameters = functionMatch[3].trim();
-
+    // try to find COMMENT ON ...
     const commentRegex = new RegExp(
-      `comment\\s+on\\s+(function|procedure)\\s+${escapeRegex(wordName)}\\s*(?:\\([^)]*?\\))?\\s+is\\s+['"]([^'"]+)['"]`,
+      `comment\\s+on\\s+(function|procedure)\\s+${escapeRegex(found.nameRaw)}\\s*(?:\\([^)]*?\\))?\\s+is\\s+['\"]([^'\"]+)['\"]`,
       "i"
     );
     const commentMatch = fullText.match(commentRegex);
     const description = commentMatch ? commentMatch[2] : "Brak opisu";
 
     const markdownContent = new vscode.MarkdownString();
-    markdownContent.appendMarkdown(`**${isFunction ? "Function" : "Procedure"}**: \`${wordName}\`\n\n`);
+    markdownContent.appendMarkdown(`**${isFunction ? "Function" : "Procedure"}**: \`${found.name}\`\n\n`);
 
     if (parameters) {
       markdownContent.appendMarkdown("**Parameters:**\n```sql\n");
@@ -220,37 +496,29 @@ class PostgresDefinitionProvider extends BasePostgresProvider implements vscode.
 
   private findDefinitionInDocument(document: vscode.TextDocument, wordName: string): vscode.Location | null {
     const fullText = document.getText();
-    const functionRegex = new RegExp(
-      `create\\s+(or\\s+replace\\s+)?(function|procedure)\\s+${escapeRegex(wordName)}\\s*\\(`,
-      "gi"
-    );
+    const decls = parseDeclarationsFromText(fullText);
+    const name = normalizeIdentifier(wordName);
+    const found = decls.find(d => d.name.toLowerCase() === name.toLowerCase());
+    if (!found) return null;
 
-    const match = functionRegex.exec(fullText);
-    if (!match) return null;
+    // locate nameRaw position within declaration
+    const declText = fullText.substring(found.startIndex, found.endIndex + 1);
+    const relIdx = declText.indexOf(found.nameRaw);
+    const absIdx = relIdx >= 0 ? found.startIndex + relIdx : found.startIndex;
+    const startPos = document.positionAt(absIdx);
+    const endPos = document.positionAt(absIdx + (found.nameRaw.length));
 
-    const lineStart = fullText.substring(0, match.index).split("\n").length - 1;
-    const lineText = document.lineAt(lineStart).text;
-    const nameStart = lineText.toLowerCase().indexOf(wordName.toLowerCase());
-
-    if (nameStart === -1) return null;
-
-    return new vscode.Location(
-      document.uri,
-      new vscode.Range(
-        new vscode.Position(lineStart, nameStart),
-        new vscode.Position(lineStart, nameStart + wordName.length)
-      )
-    );
+    return new vscode.Location(document.uri, new vscode.Range(startPos, endPos));
   }
 }
 
 class PostgresReferenceProvider extends BasePostgresProvider implements vscode.ReferenceProvider {
-  provideReferences(
+  async provideReferences(
     document: vscode.TextDocument,
     position: vscode.Position,
     _context: vscode.ReferenceContext,
     _token: vscode.CancellationToken
-  ): vscode.ProviderResult<vscode.Location[]> {
+  ): Promise<vscode.Location[]> {
     const extracted = this.extractWordAtPosition(document, position);
     if (!extracted) return [];
 
@@ -259,34 +527,39 @@ class PostgresReferenceProvider extends BasePostgresProvider implements vscode.R
     // Szukaj w bieżącym dokumencie
     this.findReferencesInDocument(document, extracted.word, references);
 
-    // Szukaj w innych plikach workspace asynchronicznie
-    this.findInWorkspace(doc => {
-      const refs: vscode.Location[] = [];
-      this.findReferencesInDocument(doc, extracted.word, refs);
-      return refs.length > 0 ? refs : null;
-    });
+    // Szukaj w innych plikach workspace i agreguj wyniki
+    const sqlFiles = await vscode.workspace.findFiles("**/*.{sql,SQL}");
+    for (const uri of sqlFiles) {
+      try {
+        const doc = await vscode.workspace.openTextDocument(uri);
+        this.findReferencesInDocument(doc, extracted.word, references);
+      } catch (e) {
+        // ignore
+      }
+    }
 
     return references;
   }
 
   private findReferencesInDocument(document: vscode.TextDocument, wordName: string, references: vscode.Location[]): void {
     const fullText = document.getText();
-    const referenceRegex = new RegExp(`\\b${escapeRegex(wordName)}\\b`, "gi");
+    const name = normalizeIdentifier(wordName);
+    // Match either quoted form or bare form
+    const quoted = '"' + name.replace(/"/g, '""') + '"';
+    const referenceRegex = new RegExp(`(${escapeRegex(quoted)}|${escapeRegex(name)})`, "gi");
     let match: RegExpExecArray | null;
 
     while ((match = referenceRegex.exec(fullText)) !== null) {
       const lineStart = fullText.substring(0, match.index).split("\n").length - 1;
       const lineText = document.lineAt(lineStart).text;
-      const charStart = lineText.toLowerCase().indexOf(wordName.toLowerCase());
-
-      if (charStart !== -1) {
+      // try to find the matched substring in the line (case-insensitive)
+      const matchText = match[0];
+      const idx = lineText.toLowerCase().indexOf(matchText.toLowerCase());
+      if (idx !== -1) {
         references.push(
           new vscode.Location(
             document.uri,
-            new vscode.Range(
-              new vscode.Position(lineStart, charStart),
-              new vscode.Position(lineStart, charStart + wordName.length)
-            )
+            new vscode.Range(new vscode.Position(lineStart, idx), new vscode.Position(lineStart, idx + matchText.length))
           )
         );
       }
@@ -559,53 +832,99 @@ class PostgresCompletionProvider extends BasePostgresProvider implements vscode.
   private workspaceInfo: Map<string, { isFunction: boolean; parameters: string; description: string }> = new Map();
   private cacheReady: boolean = false;
   private refreshTimeout: any = undefined;
+  // map fileUri -> declared names in that file (for incremental updates)
+  private workspaceFileIndex: Map<string, string[]> = new Map();
 
   async initialize(context: vscode.ExtensionContext) {
     // Wstępne zapełnienie cache w tle
     this.refreshWorkspaceCache();
 
     const watcher = vscode.workspace.createFileSystemWatcher("**/*.{sql,SQL}");
-    const schedule = () => this.scheduleRefresh();
-    watcher.onDidChange(schedule);
-    watcher.onDidCreate(schedule);
-    watcher.onDidDelete(schedule);
+    watcher.onDidChange((uri) => this.scheduleRefresh(uri));
+    watcher.onDidCreate((uri) => this.scheduleRefresh(uri));
+    watcher.onDidDelete((uri) => this.scheduleRefresh(uri));
 
     context.subscriptions.push(watcher);
   }
 
-  private scheduleRefresh(delay = 500) {
+  private scheduleRefresh(uri?: vscode.Uri, delay = 500) {
     if (this.refreshTimeout) clearTimeout(this.refreshTimeout);
     this.refreshTimeout = setTimeout(() => {
-      this.refreshWorkspaceCache();
+      this.refreshWorkspaceCache(uri);
     }, delay);
   }
 
-  private async refreshWorkspaceCache() {
-    this.cacheReady = false;
-    this.workspaceNames.clear();
-    this.workspaceInfo.clear();
+  private async refreshWorkspaceCache(uri?: vscode.Uri) {
+    // if uri provided -> incremental update for that file, otherwise full refresh
+    if (!uri) {
+      this.cacheReady = false;
+      this.workspaceNames.clear();
+      this.workspaceInfo.clear();
+      this.workspaceFileIndex.clear();
 
-    const sqlFiles = await vscode.workspace.findFiles("**/*.{sql,SQL}");
-    for (const uri of sqlFiles) {
-      try {
-        const doc = await vscode.workspace.openTextDocument(uri);
-        const text = doc.getText();
-        const regex = /create\s+(?:or\s+replace\s+)?(?:function|procedure)\s+([a-zA-Z0-9_\.\"]+)\s*\(/gi;
-        let m: RegExpExecArray | null;
-        while ((m = regex.exec(text)) !== null) {
-          const raw = m[1].replace(/\\"/g, "");
-          this.workspaceNames.add(raw);
-          if (!this.workspaceInfo.has(raw)) {
-            const info = this.findFunctionInfoInText(text, raw);
-            if (info) this.workspaceInfo.set(raw, info);
-          }
-        }
-      } catch (e) {
-        // ignoruj
+      const sqlFiles = await vscode.workspace.findFiles("**/*.{sql,SQL}");
+      for (const f of sqlFiles) {
+        await this.updateFileCache(f);
       }
+
+      this.cacheReady = true;
+      return;
     }
 
+    // incremental: update single file
+    await this.updateFileCache(uri);
     this.cacheReady = true;
+  }
+
+  private async updateFileCache(uri: vscode.Uri) {
+    try {
+      const doc = await vscode.workspace.openTextDocument(uri);
+      const text = doc.getText();
+      const decls = parseDeclarationsFromText(text);
+      const names: string[] = decls.map(d => d.name);
+
+      const key = uri.toString();
+      const prev = this.workspaceFileIndex.get(key) || [];
+
+      // remove previous names
+      for (const p of prev) {
+        // if name is no longer declared anywhere else, delete from sets/maps
+        if (p && !this.isNameDeclaredElsewhere(p, key)) {
+          this.workspaceNames.delete(p);
+          this.workspaceInfo.delete(p);
+        }
+      }
+
+      // add new names
+      for (const n of names) {
+        this.workspaceNames.add(n);
+        if (!this.workspaceInfo.has(n)) {
+          const info = this.findFunctionInfoInText(text, n);
+          if (info) this.workspaceInfo.set(n, info);
+        }
+      }
+
+      this.workspaceFileIndex.set(key, names);
+    } catch (e) {
+      // if file can't be opened (deleted), remove its index
+      const key = uri.toString();
+      const prev = this.workspaceFileIndex.get(key) || [];
+      for (const p of prev) {
+        if (p && !this.isNameDeclaredElsewhere(p, key)) {
+          this.workspaceNames.delete(p);
+          this.workspaceInfo.delete(p);
+        }
+      }
+      this.workspaceFileIndex.delete(key);
+    }
+  }
+
+  private isNameDeclaredElsewhere(name: string, excludingUri?: string): boolean {
+    for (const [k, names] of this.workspaceFileIndex.entries()) {
+      if (excludingUri && k === excludingUri) continue;
+      if (names.includes(name)) return true;
+    }
+    return false;
   }
 
   async provideCompletionItems(
@@ -710,25 +1029,22 @@ class PostgresCompletionProvider extends BasePostgresProvider implements vscode.
   }
 
   private findFunctionInfoInText(text: string, name: string): { isFunction: boolean; parameters: string; description: string } | null {
-    const functionRegex = new RegExp(
-      `create\\s+(or\\s+replace\\s+)?(function|procedure)\\s+${escapeRegex(name)}\\s*\\(([^)]*?)\\)`,
-      "i"
-    );
+    const decls = parseDeclarationsFromText(text);
+    const n = normalizeIdentifier(name);
+    const found = decls.find(d => d.name.toLowerCase() === n.toLowerCase());
+    if (!found) return null;
 
-    const functionMatch = text.match(functionRegex);
-    if (!functionMatch) return null;
-
-    const isFunction = functionMatch[2].toLowerCase() === "function";
-    const parameters = (functionMatch[3] || "").trim();
-
+    const isFunction = found.isFunction;
+    const parameters = found.params || "";
+    // try to find COMMENT ON ... nearby
     const commentRegex = new RegExp(
-      `comment\\s+on\\s+(function|procedure)\\s+${escapeRegex(name)}\\s*(?:\\([^)]*?\\))?\\s+is\\s+['"]([^'"]+)['"]`,
+      `comment\\s+on\\s+(function|procedure)\\s+${escapeRegex(found.nameRaw)}\\s*(?:\\([^)]*?\\))?\\s+is\\s+['\"]([^'\"]+)['\"]`,
       "i"
     );
     const commentMatch = text.match(commentRegex);
     const description = commentMatch ? commentMatch[2] : "Brak opisu";
 
-    return { isFunction, parameters, description };
+    return { isFunction, parameters: parameters.trim(), description };
   }
 }
 
@@ -742,6 +1058,8 @@ export const activate = (context: vscode.ExtensionContext) => {
   // Inicjalizuj cache i watcher plików dla szybkich podpowiedzi
   completionProvider.initialize(context);
 
+  const signatureProvider = new PostgresSignatureHelpProvider();
+
   const selector: vscode.DocumentSelector = [
     { language: "sql" }
   ];
@@ -754,6 +1072,10 @@ export const activate = (context: vscode.ExtensionContext) => {
     vscode.languages.registerRenameProvider(selector, renameProvider)
     ,
     vscode.languages.registerCompletionItemProvider(selector, completionProvider)
+  );
+
+  context.subscriptions.push(
+    vscode.languages.registerSignatureHelpProvider(selector, signatureProvider, '(', ',')
   );
 
   const showFunctionsCommand = vscode.commands.registerCommand(
