@@ -23,7 +23,7 @@
   },
   "//": "START EXTENSION ATTRIBUTES",
   "name": "pg-fn-tools",
-  "version": "0.0.1",
+  "version": "1.0.0",
   "description": "VSCode extension to enhance PostgreSQL function/procedure handling",
   "displayName": "Postgres Function Tools",
   "license": "MIT",
