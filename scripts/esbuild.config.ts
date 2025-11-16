@@ -18,6 +18,7 @@ const config: BuildOptions = {
     ".js": "js",
   },
   logLevel: "info",
+  drop: ["console"],
 };
 
 export default config;
