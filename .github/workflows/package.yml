@@ -1,0 +1,34 @@
+name: Package Extension
+
+on:
+    push:
+      tags:
+        - 'v*.*.*'
+
+jobs:
+  release_extension:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Set up Git repository
+        uses: actions/checkout@v5
+      
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: install dependecies
+        run: bun install --frozen-lockfile
+
+      - name: Package Extension
+        run: bun run package
+
+      - name: Release Extension
+        uses: ncipollo/release-action@v1
+        with:
+         artifacts: "*.vsix"
+         allowUpdates: true
+      
+      - name: Publish to marketplace
+        run: bun run vsce publish -p ${{ secrets.VSC_PAT }} --skip-duplicate

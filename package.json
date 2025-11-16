@@ -22,28 +22,60 @@
     "clean": "rm -r ./dist"
   },
   "//": "START EXTENSION ATTRIBUTES",
-  "name": "postgres-syntax",
+  "name": "pg-fn-tools",
   "version": "0.0.1",
-  "description": "Extension description",
-  "displayName": "Extension display name",
+  "description": "VSCode extension to enhance PostgreSQL function/procedure handling",
+  "displayName": "Postgres Function Tools",
+  "license": "MIT",
+  "publisher": "MaciejWojs",
+  "author": {
+    "name": "Maciej Wójs",
+    "url": "https://github.com/MaciejWojs"
+  },
   "repository": {
     "type": "git",
-    "url": "https://github.com/YOURNAME"
+    "url": "https://github.com/MaciejWojs/pg-fn-tools"
   },
+  "keywords": [
+    "postgres",
+    "postgresql",
+    "plpgsql",
+    "sql",
+    "functions",
+    "procedures",
+    "pg-functions",
+    "pg-procedures",
+    "sql-tools",
+    "code-navigation",
+    "completion",
+    "hover",
+    "signature-help",
+    "rename",
+    "refactor",
+    "vscode-extension",
+    "vscode",
+    "database",
+    "developer-tools"
+  ],
+  "categories": [
+    "Programming Languages",
+    "Snippets",
+    "Other"
+  ],
   "contributes": {
     "languages": [],
     "commands": [
       {
         "command": "postgres.showFunctions",
-        "title": "Postgres: Pokaż funkcje/procedury w pliku"
+        "title": "Postgres: Show functions/procedures in file"
       },
       {
         "command": "postgres.moveFunction",
-        "title": "Postgres: Przenieś funkcję/procedurę między plikami"
+        "title": "Postgres: Move function/procedure between files"
       },
       {
         "command": "postgres.generateSkeleton",
-        "title": "Postgres: Wygeneruj szkielet funkcji/procedury"
+        "title": "Postgres: Generate function/procedure skeleton"
       }
     ],
     "keybindings": [
