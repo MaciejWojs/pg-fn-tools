@@ -2,10 +2,7 @@
   "main": "./dist/extension.cjs",
   "module": "index.ts",
   "dependencies": {
-    "@types/vscode": "^1.86.0",
-    "pgsql-ast-parser": "^12.0.1",
-    "tree-sitter": "^0.25.0",
-    "tree-sitter-sql": "^0.1.0"
+    "@types/vscode": "^1.86.0"
   },
   "devDependencies": {
     "@types/bun": "latest",
@@ -37,12 +34,16 @@
     "languages": [],
     "commands": [
       {
-        "command": "bun-vscode-extension.helloworld",
-        "title": "Hello World"
-      },
-      {
         "command": "postgres.showFunctions",
         "title": "Postgres: Pokaż funkcje/procedury w pliku"
+      },
+      {
+        "command": "postgres.moveFunction",
+        "title": "Postgres: Przenieś funkcję/procedurę między plikami"
+      },
+      {
+        "command": "postgres.generateSkeleton",
+        "title": "Postgres: Wygeneruj szkielet funkcji/procedury"
       }
     ],
     "keybindings": [
