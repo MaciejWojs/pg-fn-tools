@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { BasePostgresProvider, POSTGRES_KEYWORDS, parseDeclarationsFromText, splitParameters, normalizeIdentifier, escapeRegex, extractCommentDescription } from '../utils';
+import { BasePostgresProvider, POSTGRES_KEYWORDS, parseDeclarationsFromText, normalizeIdentifier, extractCommentDescription } from '../utils';
 
 export class PostgresCompletionProvider extends BasePostgresProvider implements vscode.CompletionItemProvider {
     private workspaceNames: Set<string> = new Set();
@@ -148,24 +148,6 @@ export class PostgresCompletionProvider extends BasePostgresProvider implements 
         return items;
     }
 
-    private async findAllFunctionProcedureNamesInWorkspace(): Promise<Set<string>> {
-        if (this.cacheReady) return new Set(this.workspaceNames);
-        const result = new Set<string>();
-        const sqlFiles = await vscode.workspace.findFiles("**/*.{sql,SQL}");
-        for (const uri of sqlFiles) {
-            try {
-                const doc = await vscode.workspace.openTextDocument(uri);
-                const text = doc.getText();
-                const regex = /create\s+(?:or\s+replace\s+)?(?:function|procedure)\s+([a-zA-Z0-9_\.\"]+)\s*\(/gi;
-                let m: RegExpExecArray | null;
-                while ((m = regex.exec(text)) !== null) {
-                    result.add(m[1].replace(/\\"/g, ""));
-                }
-            } catch (e) {
-            }
-        }
-        return result;
-    }
 
     private async getFunctionInfo(name: string, document: vscode.TextDocument): Promise<{ isFunction: boolean; parameters: string; description: string } | null> {
         const inDoc = this.findFunctionInfoInText(document.getText(), name);

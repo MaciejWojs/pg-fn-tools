@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { WORD_RANGE_REGEX, isPostgresKeyword, escapeRegex, findDeclarationStart, findDeclarationEnd, DECLARATION_REGEX, DECLARE_REGEX, BEGIN_REGEX } from '../utils';
+import { WORD_RANGE_REGEX, isPostgresKeyword, escapeRegex, findDeclarationStart, findDeclarationEnd } from '../utils';
 
 export class PostgresRenameProvider implements vscode.RenameProvider {
     prepareRename(
@@ -45,7 +45,7 @@ export class PostgresRenameProvider implements vscode.RenameProvider {
             }
 
             let any = false;
-            for (const [uri, changes] of edit.entries()) {
+            for (const [, changes] of edit.entries()) {
                 if (changes && changes.length > 0) {
                     any = true;
                     break;
@@ -159,7 +159,6 @@ export class PostgresRenameProvider implements vscode.RenameProvider {
     ): boolean {
         const lineText = document.lineAt(position.line).text;
         
-        const wordStart = wordRange.start.character;
         const wordEnd = wordRange.end.character;
         
         let afterWord = lineText.substring(wordEnd).trimStart();
@@ -271,93 +270,5 @@ export class PostgresRenameProvider implements vscode.RenameProvider {
         return edit;
     }
 
-    private isInDeclareRange(
-        document: vscode.TextDocument,
-        declStart: number,
-        declEnd: number,
-        position: vscode.Position
-    ): boolean {
-        let declareLineStart = -1;
-        let declareLineEnd = -1;
 
-        for (let line = declStart; line <= declEnd; line++) {
-            const text = document.lineAt(line).text;
-            if (DECLARE_REGEX.test(text)) {
-                declareLineStart = line;
-                for (let endLine = line + 1; endLine <= declEnd; endLine++) {
-                    if (BEGIN_REGEX.test(document.lineAt(endLine).text)) {
-                        declareLineEnd = endLine;
-                        break;
-                    }
-                }
-                break;
-            }
-        }
-
-        if (declareLineStart === -1) return false;
-        return position.line >= declareLineStart && position.line <= declareLineEnd;
-    }
-
-    private isInParameterRange(
-        document: vscode.TextDocument,
-        declStart: number,
-        declEnd: number,
-        position: vscode.Position
-    ): boolean {
-        let openPos: vscode.Position | null = null;
-
-        for (let line = declStart; line <= declEnd; line++) {
-            const text = document.lineAt(line).text;
-            const idx = text.indexOf("(");
-            if (idx !== -1) {
-                openPos = new vscode.Position(line, idx);
-                break;
-            }
-        }
-
-        if (!openPos) return false;
-
-        let depth = 0;
-        let closePos: vscode.Position | null = null;
-
-        for (let line = openPos.line; line <= declEnd; line++) {
-            const text = document.lineAt(line).text;
-            const startCol = line === openPos.line ? openPos.character : 0;
-
-            for (let col = startCol; col < text.length; col++) {
-                const ch = text[col];
-                if (ch === "(") depth++;
-                if (ch === ")") {
-                    depth--;
-                    if (depth === 0) {
-                        closePos = new vscode.Position(line, col);
-                        break;
-                    }
-                }
-            }
-            if (closePos) break;
-        }
-
-        if (!closePos) return false;
-
-        if (openPos.line === closePos.line) {
-            return position.line === openPos.line &&
-                position.character > openPos.character &&
-                position.character < closePos.character;
-        }
-
-        if (position.line > openPos.line && position.line < closePos.line) {
-            return true;
-        }
-
-        if (position.line === openPos.line) {
-            return position.character > openPos.character;
-        }
-
-        if (position.line === closePos.line) {
-            return position.character < closePos.character;
-        }
-
-        return false;
-    }
 }

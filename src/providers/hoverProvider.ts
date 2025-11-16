@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { BasePostgresProvider, parseDeclarationsFromText, normalizeIdentifier, escapeRegex, extractCommentDescription } from '../utils';
+import { BasePostgresProvider, parseDeclarationsFromText, normalizeIdentifier, extractCommentDescription } from '../utils';
 
 export class PostgresHoverProvider extends BasePostgresProvider implements vscode.HoverProvider {
     async provideHover(
